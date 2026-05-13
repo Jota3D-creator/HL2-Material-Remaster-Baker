@@ -1,0 +1,16 @@
+{
+  "addon_name": "HL2 Material Remaster Baker",
+  "version": "0.6.2",
+  "download_url": "https://drive.google.com/uc?export=download&confirm=t&id=10B-pL908FGCWN4OBtSM-3jt2o9bepnta",
+  "filename": "HL2_Material_Remaster_Baker.py",
+  "release_date": "2026-05-12",
+  "changelog": [
+    "Removed the extra Depth Preview File Output workaround.",
+    "Depth Pass Viewer now looks for HL2_Viewer_Depth and shows it in the Image Editor.",
+    "Camera background image is shown in FRONT.",
+    "Camera BG Opacity was moved under Fill Principled.",
+    "BaseColor, Roughness and Metallic exports now use the actual input connected to the Principled shader.",
+    "Test Maps displacement scale is now 1.0."
+  ],
+  "restart_required": true
+}
