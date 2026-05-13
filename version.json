@@ -1,16 +1,22 @@
 {
   "addon_name": "HL2 Material Remaster Baker",
   "version": "0.6.2",
-  "download_url": "https://drive.google.com/uc?export=download&confirm=t&id=10B-pL908FGCWN4OBtSM-3jt2o9bepnta",
-  "filename": "HL2_Material_Remaster_Baker.py",
-  "release_date": "2026-05-12",
+  "download_url": "https://raw.githubusercontent.com/Jota3D-creator/HL2-Material-Remaster-Baker/main/HL2%20Material%20Remaster%20Baker.py",
+  "filename": "HL2 Material Remaster Baker.py",
+  "release_date": "2026-05-13",
   "changelog": [
-    "Removed the extra Depth Preview File Output workaround.",
-    "Depth Pass Viewer now looks for HL2_Viewer_Depth and shows it in the Image Editor.",
-    "Camera background image is shown in FRONT.",
-    "Camera BG Opacity was moved under Fill Principled.",
-    "BaseColor, Roughness and Metallic exports now use the actual input connected to the Principled shader.",
-    "Test Maps displacement scale is now 1.0."
+    "Added Working Blend Folder.",
+    "Added Save Blend Before Setup with confirmation dialog.",
+    "Create Front Setup and Create Top-Down Setup now ask to save the blend before continuing.",
+    "Blend files are saved as TextureName.blend inside the Working Blend Folder.",
+    "The working material is now named after the Texture Name.",
+    "Added Preserve Node Tree on New Setup, disabled by default.",
+    "When preserving the node tree, the addon renames the material and updates the OLD Base image.",
+    "Export Normal now temporarily sets displacement scale to 0 and restores the previous values after baking.",
+    "Added Old Map below Test Maps.",
+    "Old Map creates a left-side reference plane using the current Source Base Color.",
+    "Old Map updates automatically when creating a setup with a new Source Base Color.",
+    "Technical exports now prioritize NEW_PBR_Principled."
   ],
   "restart_required": true
 }
