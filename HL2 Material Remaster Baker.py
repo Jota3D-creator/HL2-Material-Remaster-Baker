@@ -1,7 +1,7 @@
 bl_info = {
     "name": "HL2 Material Remaster Baker",
     "author": "Jonatan Mercado",
-    "version": (0, 6, 9),
+    "version": (0, 6, 10),
     "blender": (4, 0, 0),
     "location": "View3D / Image Editor > Sidebar > HL2 Remaster",
     "description": "Orthographic PBR remaster setup, baker, tester, and UV tools for HL2 material textures.",
@@ -59,6 +59,18 @@ def out_path(folder, tex_name, suffix, ext="png"):
     return os.path.join(folder, f"{tex_name}_{suffix}.{ext}")
 
 
+def purge_orphan_data():
+    try:
+        for _ in range(3):
+            bpy.ops.outliner.orphans_purge(
+                do_local_ids=True,
+                do_linked_ids=True,
+                do_recursive=True,
+            )
+    except Exception:
+        pass
+
+
 def clear_scene_objects():
     bpy.ops.object.select_all(action='SELECT')
     bpy.ops.object.delete()
@@ -69,6 +81,8 @@ def clear_scene_objects():
             bpy.data.collections.remove(col)
         except Exception:
             pass
+
+    purge_orphan_data()
 
 
 def ensure_collection(name):
@@ -335,6 +349,96 @@ def restore_displacement_scales(records):
             node.inputs["Scale"].default_value = old_value
         except Exception:
             pass
+
+
+def get_material_output_node(mat):
+    if not mat or not mat.use_nodes:
+        return None
+
+    named = mat.node_tree.nodes.get("Material Output")
+
+    if named and named.bl_idname == "ShaderNodeOutputMaterial":
+        return named
+
+    for node in mat.node_tree.nodes:
+        if node.bl_idname == "ShaderNodeOutputMaterial":
+            return node
+
+    return None
+
+
+def get_displacement_node(mat):
+    if not mat or not mat.use_nodes:
+        return None
+
+    named = mat.node_tree.nodes.get("HL2_Displacement")
+
+    if named and named.bl_idname == "ShaderNodeDisplacement":
+        return named
+
+    for node in mat.node_tree.nodes:
+        if node.bl_idname == "ShaderNodeDisplacement":
+            return node
+
+    return None
+
+
+def disconnect_material_displacement(mat):
+    if not mat or not mat.use_nodes:
+        return False
+
+    output = get_material_output_node(mat)
+
+    if output is None or "Displacement" not in output.inputs:
+        return False
+
+    links = mat.node_tree.links
+
+    for link in list(output.inputs["Displacement"].links):
+        links.remove(link)
+
+    return True
+
+
+def connect_material_displacement(mat):
+    if not mat or not mat.use_nodes:
+        return False
+
+    output = get_material_output_node(mat)
+    displacement = get_displacement_node(mat)
+
+    if output is None or displacement is None:
+        return False
+
+    if "Displacement" not in output.inputs or "Displacement" not in displacement.outputs:
+        return False
+
+    links = mat.node_tree.links
+
+    for link in list(output.inputs["Displacement"].links):
+        links.remove(link)
+
+    links.new(displacement.outputs["Displacement"], output.inputs["Displacement"])
+    return True
+
+
+def set_camera_background_opacity(scene, opacity):
+    cam = scene.camera or bpy.data.objects.get(CAMERA_NAME)
+
+    if cam is None or cam.type != 'CAMERA':
+        return False
+
+    try:
+        cam.data.show_background_images = True
+
+        for bg in cam.data.background_images:
+            bg.alpha = float(opacity)
+            bg.display_depth = 'FRONT'
+
+        return True
+    except Exception:
+        return False
+
 
 
 # -----------------------------------------------------------------------------
@@ -1040,6 +1144,12 @@ def set_old_new_switch(value):
         return False, "OLD / NEW switch not found"
 
     sw.inputs[0].default_value = value
+
+    if value <= 0.0:
+        disconnect_material_displacement(mat)
+    else:
+        connect_material_displacement(mat)
+
     return True, "Switch updated"
 
 
@@ -1279,35 +1389,35 @@ def create_export_material(original_mat, channel):
     if channel == "BaseColor":
         node = named_node(mat, ["NEW_BaseColor", "BaseColor", "Base Color"])
 
-        if node and node.bl_idname == "ShaderNodeTexImage" and node.image:
-            source = node.outputs["Color"]
-        elif princ and "Base Color" in princ.inputs:
+        if princ and "Base Color" in princ.inputs:
             if princ.inputs["Base Color"].links:
                 source = princ.inputs["Base Color"].links[0].from_socket
             else:
                 source = make_constant(nodes, princ.inputs["Base Color"].default_value, "BaseColor_Constant").outputs[0]
+        elif node and node.bl_idname == "ShaderNodeTexImage" and node.image:
+            source = node.outputs["Color"]
 
     elif channel == "Roughness":
         node = named_node(mat, ["NEW_Roughness", "Roughness"])
 
-        if node and node.bl_idname == "ShaderNodeTexImage" and node.image:
-            source = node.outputs["Color"]
-        elif princ and "Roughness" in princ.inputs:
+        if princ and "Roughness" in princ.inputs:
             if princ.inputs["Roughness"].links:
                 source = princ.inputs["Roughness"].links[0].from_socket
             else:
                 source = make_constant(nodes, princ.inputs["Roughness"].default_value, "Roughness_Constant").outputs[0]
+        elif node and node.bl_idname == "ShaderNodeTexImage" and node.image:
+            source = node.outputs["Color"]
 
     elif channel == "Metallic":
         node = named_node(mat, ["NEW_Metallic", "Metallic"])
 
-        if node and node.bl_idname == "ShaderNodeTexImage" and node.image:
-            source = node.outputs["Color"]
-        elif princ and "Metallic" in princ.inputs:
+        if princ and "Metallic" in princ.inputs:
             if princ.inputs["Metallic"].links:
                 source = princ.inputs["Metallic"].links[0].from_socket
             else:
                 source = make_constant(nodes, princ.inputs["Metallic"].default_value, "Metallic_Constant").outputs[0]
+        elif node and node.bl_idname == "ShaderNodeTexImage" and node.image:
+            source = node.outputs["Color"]
 
     if source is None:
         fallback = {
@@ -2651,6 +2761,24 @@ def hl2_rectify_uv_selection(context):
 # Properties
 # -----------------------------------------------------------------------------
 
+def update_camera_bg_opacity(self, context):
+    try:
+        set_camera_background_opacity(context.scene, self.camera_bg_opacity)
+    except Exception:
+        pass
+
+
+def update_source_as_camera_bg(self, context):
+    try:
+        if self.use_source_as_camera_background:
+            set_camera_background_from_source(context.scene, self)
+        else:
+            cam = context.scene.camera or bpy.data.objects.get(CAMERA_NAME)
+            remove_camera_backgrounds(cam)
+    except Exception:
+        pass
+
+
 def update_render_resolution(self, context):
     try:
         apply_resolution(context.scene, self.resolution)
@@ -2691,6 +2819,7 @@ class HL2RemasterProperties(bpy.types.PropertyGroup):
         name="Source as Camera BG",
         description="Use the Source Base Color as a front camera background reference",
         default=True,
+        update=update_source_as_camera_bg,
     )
 
     camera_bg_opacity: bpy.props.FloatProperty(
@@ -2699,6 +2828,7 @@ class HL2RemasterProperties(bpy.types.PropertyGroup):
         min=0.0,
         max=1.0,
         precision=2,
+        update=update_camera_bg_opacity,
     )
 
     output_folder: bpy.props.StringProperty(
@@ -2806,7 +2936,7 @@ class HL2RemasterProperties(bpy.types.PropertyGroup):
 
     addon_local_version: bpy.props.StringProperty(
         name="Current Version",
-        default="0.6.9",
+        default="0.6.10",
     )
 
     addon_available_version: bpy.props.StringProperty(
@@ -2853,6 +2983,7 @@ def create_setup(context, mode):
 
     if props.clear_scene_on_setup and not props.preserve_node_tree_on_setup:
         clear_scene_objects()
+        purge_orphan_data()
 
     col = ensure_collection(ADDON_COLLECTION_NAME)
     setup_scene(scene, props, preview=True)
@@ -2957,7 +3088,7 @@ class HL2REM_OT_use_new_base_preview(bpy.types.Operator):
 
     def execute(self, context):
         ok, message = set_old_new_switch(1.0)
-        self.report({'INFO'} if ok else {'ERROR'}, "Using NEW PBR material" if ok else message)
+        self.report({'INFO'} if ok else {'ERROR'}, "Using NEW PBR material with displacement reconnected" if ok else message)
         return {'FINISHED'} if ok else {'CANCELLED'}
 
 
@@ -2978,6 +3109,10 @@ class HL2REM_OT_render_preview(bpy.types.Operator):
 
         try:
             setup_scene(scene, props, preview=True)
+
+            if props.use_source_as_camera_background:
+                set_camera_background_from_source(scene, props)
+                set_camera_background_opacity(scene, props.camera_bg_opacity)
 
             scene.render.filepath = path
             scene.render.image_settings.file_format = 'PNG'
