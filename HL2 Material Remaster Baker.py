@@ -1,7 +1,7 @@
 bl_info = {
     "name": "HL2 Material Remaster Baker",
     "author": "Jonatan Mercado",
-    "version": (0, 6, 11),
+    "version": (0, 6, 12),
     "blender": (4, 0, 0),
     "location": "View3D / Image Editor > Sidebar > HL2 Remaster",
     "description": "Orthographic PBR remaster setup, baker, tester, and UV tools for HL2 material textures.",
@@ -69,6 +69,30 @@ def purge_orphan_data():
             )
     except Exception:
         pass
+
+
+def delete_test_maps_objects_and_materials():
+    """
+    Remove the previous Test Maps plane and its associated HL2_Test_* materials.
+    This is called when creating a new setup because the old exported test map
+    is no longer relevant for the new texture/model.
+    """
+    test_obj = bpy.data.objects.get(TEST_PLANE_NAME)
+
+    if test_obj:
+        try:
+            bpy.data.objects.remove(test_obj, do_unlink=True)
+        except Exception:
+            pass
+
+    for mat in list(bpy.data.materials):
+        if mat.name.startswith(TEST_MATERIAL_PREFIX):
+            try:
+                bpy.data.materials.remove(mat)
+            except Exception:
+                pass
+
+    purge_orphan_data()
 
 
 def clear_scene_objects():
@@ -1525,7 +1549,19 @@ def render_technical_channel(scene, props, channel):
     try:
         setup_scene(scene, props, preview=False)
 
-        scene.view_settings.view_transform = 'Standard'
+        if channel == "BaseColor":
+            scene.view_settings.view_transform = 'Standard'
+            scene.render.image_settings.color_mode = 'RGB'
+        else:
+            # Roughness and Metallic are data maps.
+            # Export them through Raw so re-importing as Non-Color preserves values.
+            try:
+                scene.view_settings.view_transform = 'Raw'
+            except Exception:
+                scene.view_settings.view_transform = 'Standard'
+
+            scene.render.image_settings.color_mode = 'BW'
+
         scene.view_settings.look = 'None'
         scene.view_settings.exposure = 0.0
         scene.view_settings.gamma = 1.0
@@ -1533,7 +1569,6 @@ def render_technical_channel(scene, props, channel):
         scene.render.filepath = path
         scene.render.image_settings.file_format = 'PNG'
         scene.render.image_settings.color_depth = '16'
-        scene.render.image_settings.color_mode = 'RGB' if channel == "BaseColor" else 'BW'
 
         bpy.ops.render.render(write_still=True)
 
@@ -2971,7 +3006,7 @@ class HL2RemasterProperties(bpy.types.PropertyGroup):
 
     addon_local_version: bpy.props.StringProperty(
         name="Current Version",
-        default="0.6.11",
+        default="0.6.12",
     )
 
     addon_available_version: bpy.props.StringProperty(
@@ -3016,6 +3051,10 @@ def create_setup(context, mode):
             raise RuntimeError(message)
 
     current_mat = get_working_material(props)
+
+    # Previous Test Maps are no longer relevant when starting a new setup.
+    # Removing them also allows their temporary test materials to be purged.
+    delete_test_maps_objects_and_materials()
 
     if props.clear_scene_on_setup and not props.preserve_node_tree_on_setup:
         clear_scene_objects()
