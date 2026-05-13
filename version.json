@@ -1,10 +1,16 @@
 {
   "addon_name": "HL2 Material Remaster Baker",
-  "version": "0.6.6",
+  "version": "0.6.7",
   "download_url": "https://raw.githubusercontent.com/Jota3D-creator/HL2-Material-Remaster-Baker/main/HL2%20Material%20Remaster%20Baker.py",
   "filename": "HL2 Material Remaster Baker.py",
   "release_date": "2026-05-13",
   "changelog": [
+    "Restored the Addon Update section in the UI.",
+    "Added missing updater properties to prevent AttributeError issues in Blender.",
+    "Made the updater UI safer by using fallback values when Blender still has an older property group registered.",
+    "Added GitHub raw version.json as the default update source.",
+    "Added Check for Updates button.",
+    "Added Install Latest Version button.",
     "Added Working Blend Folder.",
     "Added Save Blend Before Setup with confirmation dialog.",
     "Create Front Setup and Create Top-Down Setup now ask to save the blend before continuing.",
@@ -12,11 +18,17 @@
     "The working material is now named after the Texture Name.",
     "Added Preserve Node Tree on New Setup, disabled by default.",
     "When preserving the node tree, the addon renames the material and updates the OLD Base image.",
-    "Export Normal now temporarily sets displacement scale to 0 and restores the previous values after baking.",
+    "Export Normal now temporarily sets displacement scale to 0 and restores the previous displacement values after baking.",
     "Added Old Map below Test Maps.",
     "Old Map creates a left-side reference plane using the current Source Base Color.",
     "Old Map updates automatically when creating a setup with a new Source Base Color.",
-    "Technical exports now prioritize NEW_PBR_Principled."
+    "Old Map and Test Maps are now placed closer to the working plane with a 0.20m gap.",
+    "Moved Fill Principled before the Preview section.",
+    "Moved Camera BG Opacity into the Preview section, below Use OLD Base / Use NEW PBR and above Render Preview.",
+    "Test Maps displacement scale is set to 1.0.",
+    "Viewport dicing rate is set to 1.0.",
+    "Technical exports now prioritize the NEW_PBR_Principled node."
   ],
-  "restart_required": true
+  "restart_required": true,
+  "notes": "After installing this version, restart Blender to make sure the updated property group is registered correctly."
 }
