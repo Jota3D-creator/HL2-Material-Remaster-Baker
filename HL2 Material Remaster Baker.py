@@ -1,7 +1,7 @@
 bl_info = {
     "name": "HL2 Material Remaster Baker",
     "author": "Jonatan Mercado",
-    "version": (0, 6, 10),
+    "version": (0, 6, 11),
     "blender": (4, 0, 0),
     "location": "View3D / Image Editor > Sidebar > HL2 Remaster",
     "description": "Orthographic PBR remaster setup, baker, tester, and UV tools for HL2 material textures.",
@@ -257,19 +257,54 @@ def suggested_blend_path(props):
     return os.path.join(folder, f"{safe_texture_name(props.texture_name)}.blend")
 
 
-def save_blend_for_texture(props):
+def save_current_blend_before_setup(props):
+    """
+    Save the current/original .blend before changing the scene.
+
+    If the current file already exists on disk, this saves it in place.
+    This protects the previous texture setup before we purge/create the new one.
+    """
     if not props.save_blend_before_setup:
         return True, "Save before setup disabled"
+
+    current_path = bpy.data.filepath
+
+    if not current_path:
+        return True, "Current blend has no filepath yet. It will be saved after setup."
+
+    try:
+        bpy.ops.wm.save_as_mainfile(filepath=current_path)
+        return True, f"Current blend saved: {current_path}"
+    except Exception as error:
+        return False, f"Could not save current blend before setup: {error}"
+
+
+def save_new_texture_blend_after_setup(props):
+    """
+    Save the finished new setup as TextureName.blend inside Working Blend Folder.
+    This happens after the scene has been purged/rebuilt and the new texture is loaded.
+    """
+    if not props.save_blend_before_setup:
+        return True, "Save after setup disabled"
+
     if not props.working_blend_folder:
         return False, "Please set a Working Blend Folder before creating the setup"
+
     path = suggested_blend_path(props)
+
     if not path:
         return False, "Could not build blend save path"
+
     try:
         bpy.ops.wm.save_as_mainfile(filepath=path)
-        return True, f"Blend saved: {path}"
+        return True, f"New setup blend saved: {path}"
     except Exception as error:
-        return False, f"Could not save blend file: {error}"
+        return False, f"Could not save new setup blend after setup: {error}"
+
+
+def save_blend_for_texture(props):
+    # Legacy compatibility wrapper. New setup flow uses before + after saves.
+    return save_new_texture_blend_after_setup(props)
 
 
 def get_working_material(props=None):
@@ -2804,7 +2839,7 @@ class HL2RemasterProperties(bpy.types.PropertyGroup):
 
     save_blend_before_setup: bpy.props.BoolProperty(
         name="Save Blend Before Setup",
-        description="Before creating a setup, save the blend file using the Texture Name inside the Working Blend Folder",
+        description="Save the current blend before setup, then save the rebuilt setup as TextureName.blend inside the Working Blend Folder",
         default=True,
     )
 
@@ -2936,7 +2971,7 @@ class HL2RemasterProperties(bpy.types.PropertyGroup):
 
     addon_local_version: bpy.props.StringProperty(
         name="Current Version",
-        default="0.6.10",
+        default="0.6.11",
     )
 
     addon_available_version: bpy.props.StringProperty(
@@ -2975,7 +3010,8 @@ def create_setup(context, mode):
     props.setup_mode = mode
 
     if props.save_blend_before_setup:
-        ok, message = save_blend_for_texture(props)
+        ok, message = save_current_blend_before_setup(props)
+
         if not ok:
             raise RuntimeError(message)
 
@@ -3009,6 +3045,12 @@ def create_setup(context, mode):
     if props.switch_to_shading_on_setup or props.camera_view_on_setup:
         switch_to_shading_and_camera(cam)
 
+    if props.save_blend_before_setup:
+        ok, message = save_new_texture_blend_after_setup(props)
+
+        if not ok:
+            raise RuntimeError(message)
+
     return plane, cam
 
 
@@ -3030,7 +3072,7 @@ class HL2REM_OT_create_front_setup(bpy.types.Operator):
     def draw(self, context):
         props = context.scene.hl2remaster_props
         layout = self.layout
-        layout.label(text="Save and continue with Front Setup?")
+        layout.label(text="Save current file, build setup, then save new texture blend?")
         layout.label(text=f"Texture: {props.texture_name}")
         layout.label(text=f"Target: {suggested_blend_path(props) or 'Set Working Blend Folder'}")
 
@@ -3058,7 +3100,7 @@ class HL2REM_OT_create_top_down_setup(bpy.types.Operator):
     def draw(self, context):
         props = context.scene.hl2remaster_props
         layout = self.layout
-        layout.label(text="Save and continue with Top-Down Setup?")
+        layout.label(text="Save current file, build setup, then save new texture blend?")
         layout.label(text=f"Texture: {props.texture_name}")
         layout.label(text=f"Target: {suggested_blend_path(props) or 'Set Working Blend Folder'}")
 
