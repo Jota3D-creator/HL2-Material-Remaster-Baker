@@ -1,7 +1,7 @@
 bl_info = {
     "name": "HL2 Material Remaster Baker",
     "author": "Jonatan Mercado",
-    "version": (0, 6, 12),
+    "version": (0, 6, 14),
     "blender": (4, 0, 0),
     "location": "View3D / Image Editor > Sidebar > HL2 Remaster",
     "description": "Orthographic PBR remaster setup, baker, tester, and UV tools for HL2 material textures.",
@@ -132,6 +132,49 @@ def move_to_collection(obj, col):
         col.objects.link(obj)
     except Exception:
         pass
+
+
+def make_object_non_renderable(obj):
+    """Keep helper/reference planes visible in the viewport but excluded from renders."""
+    if obj is None:
+        return
+
+    try:
+        obj.hide_render = True
+    except Exception:
+        pass
+
+    try:
+        obj.visible_shadow = False
+    except Exception:
+        pass
+
+    try:
+        obj.visible_diffuse = False
+    except Exception:
+        pass
+
+    try:
+        obj.visible_glossy = False
+    except Exception:
+        pass
+
+    try:
+        obj.visible_transmission = False
+    except Exception:
+        pass
+
+    try:
+        obj.visible_volume_scatter = False
+    except Exception:
+        pass
+
+    try:
+        obj.visible_camera = False
+    except Exception:
+        pass
+
+
 
 
 def set_image_color_space(img, color_space):
@@ -982,6 +1025,54 @@ def camera_location_for_mode(mode, distance):
     return (0.0, 0.0, distance)
 
 
+def lock_camera_transform(cam):
+    if cam is None:
+        return
+
+    try:
+        cam.lock_location = (True, True, True)
+        cam.lock_rotation = (True, True, True)
+        cam.lock_scale = (True, True, True)
+    except Exception:
+        pass
+
+
+def unlock_camera_transform(cam):
+    if cam is None:
+        return
+
+    try:
+        cam.lock_location = (False, False, False)
+        cam.lock_rotation = (False, False, False)
+        cam.lock_scale = (False, False, False)
+    except Exception:
+        pass
+
+
+def reset_hl2_camera_transform(props):
+    col = ensure_collection(ADDON_COLLECTION_NAME)
+    cam = get_or_create_camera(
+        col,
+        props.plane_size,
+        props.camera_z_distance,
+        props.setup_mode,
+    )
+
+    unlock_camera_transform(cam)
+
+    cam.location = camera_location_for_mode(props.setup_mode, props.camera_z_distance)
+    cam.rotation_euler = camera_rotation_for_mode(props.setup_mode)
+    cam.data.type = 'ORTHO'
+    cam.data.ortho_scale = props.plane_size
+    cam.data.clip_start = 0.01
+    cam.data.clip_end = 1000.0
+
+    lock_camera_transform(cam)
+    bpy.context.scene.camera = cam
+
+    return cam
+
+
 # -----------------------------------------------------------------------------
 # Scene setup objects
 # -----------------------------------------------------------------------------
@@ -1037,6 +1128,8 @@ def get_or_create_camera(col, plane_size=2.0, camera_distance=3.0, mode=MODE_FRO
     else:
         move_to_collection(cam, col)
 
+    unlock_camera_transform(cam)
+
     cam.location = camera_location_for_mode(mode, camera_distance)
     cam.rotation_euler = camera_rotation_for_mode(mode)
 
@@ -1044,6 +1137,8 @@ def get_or_create_camera(col, plane_size=2.0, camera_distance=3.0, mode=MODE_FRO
     cam.data.ortho_scale = plane_size
     cam.data.clip_start = 0.01
     cam.data.clip_end = 1000.0
+
+    lock_camera_transform(cam)
 
     return cam
 
@@ -1660,6 +1755,7 @@ def create_or_update_old_map_plane(props, create_if_missing=True):
     old_plane.rotation_euler = rotation
     mat = create_old_map_material(props)
     assign_material(old_plane, mat)
+    make_object_non_renderable(old_plane)
     return old_plane
 
 
@@ -1851,6 +1947,7 @@ def create_or_update_test_maps_plane(props):
     mat = create_test_maps_material(props)
     assign_material(test_plane, mat)
     safe_set_material_displacement(mat)
+    make_object_non_renderable(test_plane)
 
     return test_plane
 
@@ -3006,7 +3103,7 @@ class HL2RemasterProperties(bpy.types.PropertyGroup):
 
     addon_local_version: bpy.props.StringProperty(
         name="Current Version",
-        default="0.6.12",
+        default="0.6.14",
     )
 
     addon_available_version: bpy.props.StringProperty(
@@ -3150,6 +3247,24 @@ class HL2REM_OT_create_top_down_setup(bpy.types.Operator):
             self.report({'ERROR'}, str(error))
             return {'CANCELLED'}
         self.report({'INFO'}, "Top-Down setup created")
+        return {'FINISHED'}
+
+
+class HL2REM_OT_reset_camera_transform(bpy.types.Operator):
+    bl_idname = "hl2remaster.reset_camera_transform"
+    bl_label = "Reset / Lock Camera"
+    bl_description = "Return the HL2 setup camera to the correct position, rotation, orthographic scale, and lock its transform"
+
+    def execute(self, context):
+        props = context.scene.hl2remaster_props
+
+        try:
+            reset_hl2_camera_transform(props)
+        except Exception as error:
+            self.report({'ERROR'}, f"Could not reset camera: {error}")
+            return {'CANCELLED'}
+
+        self.report({'INFO'}, "Camera reset and transform locked")
         return {'FINISHED'}
 
 
@@ -3537,6 +3652,7 @@ def draw_hl2_panel(layout, context, compact=False):
     setup_box.separator()
     setup_box.operator("hl2remaster.create_front_setup", icon='MOD_BUILD')
     setup_box.operator("hl2remaster.create_top_down_setup", icon='MOD_BUILD')
+    setup_box.operator("hl2remaster.reset_camera_transform", text="Reset / Lock Camera", icon='CAMERA_DATA')
 
     fill_box = layout.box()
     fill_box.label(text="Fill Principled")
@@ -3626,6 +3742,7 @@ def draw_hl2_panel(layout, context, compact=False):
             ref.label(text="Front normal: R=X, G=Z, B=-Y")
             ref.label(text="Old Map = left-side source reference")
             ref.label(text="Old/Test planes gap = 0.20m")
+            ref.label(text="Old/Test planes are viewport references only, not renderable")
             ref.label(text="Test Maps displacement scale = 1.0")
             ref.label(text="Base plane maps to 0.5")
             ref.label(text="Depth uses symmetric max(front, back)")
@@ -3661,6 +3778,7 @@ classes = (
     HL2RemasterProperties,
     HL2REM_OT_create_front_setup,
     HL2REM_OT_create_top_down_setup,
+    HL2REM_OT_reset_camera_transform,
     HL2REM_OT_use_old_base_preview,
     HL2REM_OT_use_new_base_preview,
     HL2REM_OT_render_preview,
