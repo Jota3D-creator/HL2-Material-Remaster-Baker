@@ -1,7 +1,7 @@
 bl_info = {
     "name": "HL2 Material Remaster Baker",
     "author": "Jonatan Mercado",
-    "version": (0, 6, 14),
+    "version": (0, 7, 0),
     "blender": (4, 0, 0),
     "location": "View3D / Image Editor > Sidebar > HL2 Remaster",
     "description": "Orthographic PBR remaster setup, baker, tester, and UV tools for HL2 material textures.",
@@ -135,42 +135,12 @@ def move_to_collection(obj, col):
 
 
 def make_object_non_renderable(obj):
-    """Keep helper/reference planes visible in the viewport but excluded from renders."""
+    """Keep helper/reference planes visible in the viewport but excluded from final renders."""
     if obj is None:
         return
 
     try:
         obj.hide_render = True
-    except Exception:
-        pass
-
-    try:
-        obj.visible_shadow = False
-    except Exception:
-        pass
-
-    try:
-        obj.visible_diffuse = False
-    except Exception:
-        pass
-
-    try:
-        obj.visible_glossy = False
-    except Exception:
-        pass
-
-    try:
-        obj.visible_transmission = False
-    except Exception:
-        pass
-
-    try:
-        obj.visible_volume_scatter = False
-    except Exception:
-        pass
-
-    try:
-        obj.visible_camera = False
     except Exception:
         pass
 
@@ -3103,7 +3073,7 @@ class HL2RemasterProperties(bpy.types.PropertyGroup):
 
     addon_local_version: bpy.props.StringProperty(
         name="Current Version",
-        default="0.6.14",
+        default="0.7.0",
     )
 
     addon_available_version: bpy.props.StringProperty(
