@@ -1,7 +1,7 @@
 bl_info = {
     "name": "HL2 Material Remaster Baker",
     "author": "Jonatan Mercado",
-    "version": (0, 7, 0),
+    "version": (0, 7, 2),
     "blender": (4, 0, 0),
     "location": "View3D / Image Editor > Sidebar > HL2 Remaster",
     "description": "Orthographic PBR remaster setup, baker, tester, and UV tools for HL2 material textures.",
@@ -42,6 +42,10 @@ TOP_DOWN_CAMERA_ROTATION = (0.0, 0.0, 0.0)
 UV_RECTIFY_PRECISION = 3
 
 UPDATE_VERSION_URL = "https://raw.githubusercontent.com/Jota3D-creator/HL2-Material-Remaster-Baker/main/version.json"
+
+# Slightly crop the orthographic camera to avoid a 1px border from the plane/background edge.
+# With the default plane size 2.0, this gives an orthographic scale of 1.999.
+CAMERA_ORTHO_CROP_FACTOR = 0.9995
 
 
 # -----------------------------------------------------------------------------
@@ -995,6 +999,10 @@ def camera_location_for_mode(mode, distance):
     return (0.0, 0.0, distance)
 
 
+def camera_ortho_scale_for_plane(plane_size):
+    return float(plane_size) * CAMERA_ORTHO_CROP_FACTOR
+
+
 def lock_camera_transform(cam):
     if cam is None:
         return
@@ -1033,7 +1041,7 @@ def reset_hl2_camera_transform(props):
     cam.location = camera_location_for_mode(props.setup_mode, props.camera_z_distance)
     cam.rotation_euler = camera_rotation_for_mode(props.setup_mode)
     cam.data.type = 'ORTHO'
-    cam.data.ortho_scale = props.plane_size
+    cam.data.ortho_scale = camera_ortho_scale_for_plane(props.plane_size)
     cam.data.clip_start = 0.01
     cam.data.clip_end = 1000.0
 
@@ -1104,7 +1112,7 @@ def get_or_create_camera(col, plane_size=2.0, camera_distance=3.0, mode=MODE_FRO
     cam.rotation_euler = camera_rotation_for_mode(mode)
 
     cam.data.type = 'ORTHO'
-    cam.data.ortho_scale = plane_size
+    cam.data.ortho_scale = camera_ortho_scale_for_plane(plane_size)
     cam.data.clip_start = 0.01
     cam.data.clip_end = 1000.0
 
@@ -3073,7 +3081,7 @@ class HL2RemasterProperties(bpy.types.PropertyGroup):
 
     addon_local_version: bpy.props.StringProperty(
         name="Current Version",
-        default="0.7.0",
+        default="0.7.2",
     )
 
     addon_available_version: bpy.props.StringProperty(
@@ -3715,6 +3723,7 @@ def draw_hl2_panel(layout, context, compact=False):
             ref.label(text="Old/Test planes are viewport references only, not renderable")
             ref.label(text="Test Maps displacement scale = 1.0")
             ref.label(text="Base plane maps to 0.5")
+            ref.label(text="Camera ortho scale is cropped to 99.95% to avoid 1px borders")
             ref.label(text="Depth uses symmetric max(front, back)")
             ref.label(text="UV Rectify requires UV Editor, Edit Mode, Sync Off")
             ref.label(text="Dicing Render = 1")
