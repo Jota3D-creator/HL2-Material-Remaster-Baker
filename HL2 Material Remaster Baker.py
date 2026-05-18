@@ -1,7 +1,7 @@
 bl_info = {
     "name": "HL2 Material Remaster Baker",
     "author": "Jonatan Mercado",
-    "version": (0, 7, 2),
+    "version": (0, 7, 3),
     "blender": (4, 0, 0),
     "location": "View3D / Image Editor > Sidebar > HL2 Remaster",
     "description": "Orthographic PBR remaster setup, baker, tester, and UV tools for HL2 material textures.",
@@ -1318,6 +1318,9 @@ def detect_pbr_type(filename):
     if any(k in name for k in ["height", "displacement", "disp", "_displ", "-displ", "_hgt", "-hgt"]):
         return "height"
 
+    if any(k in name for k in ["glossiness", "gloss", "_gloss", "-gloss", "_gls", "-gls"]):
+        return "gloss"
+
     if any(k in name for k in ["roughness", "rough", "_rgh", "-rgh"]):
         return "roughness"
 
@@ -1380,6 +1383,7 @@ def fill_principled_from_files(props, filepaths):
     detected = {
         "basecolor": None,
         "roughness": None,
+        "gloss": None,
         "metallic": None,
         "normal": None,
         "height": None,
@@ -1396,8 +1400,14 @@ def fill_principled_from_files(props, filepaths):
     if detected["basecolor"] and assign_image_to_node(new_base, detected["basecolor"], "sRGB"):
         loaded.append("BaseColor")
 
+    roughness_uses_gloss = False
+
     if detected["roughness"] and assign_image_to_node(new_rough, detected["roughness"], "Non-Color"):
         loaded.append("Roughness")
+    elif detected["gloss"] and assign_image_to_node(new_rough, detected["gloss"], "Non-Color"):
+        roughness_uses_gloss = True
+        new_rough.label = "NEW Gloss -> Roughness"
+        loaded.append("Gloss as Roughness")
 
     if detected["metallic"] and assign_image_to_node(new_met, detected["metallic"], "Non-Color"):
         loaded.append("Metallic")
@@ -1412,7 +1422,24 @@ def fill_principled_from_files(props, filepaths):
         connect_unique(mat, new_base.outputs["Color"], princ.inputs["Base Color"])
 
     if new_rough.image and "Roughness" in princ.inputs:
-        connect_unique(mat, new_rough.outputs["Color"], princ.inputs["Roughness"])
+        if roughness_uses_gloss:
+            gloss_invert = get_or_create_node(
+                mat,
+                "HL2_Gloss_To_Roughness_Invert",
+                "ShaderNodeInvert",
+                "Gloss -> Roughness Invert",
+                (-500, -220),
+            )
+
+            try:
+                gloss_invert.inputs["Fac"].default_value = 1.0
+            except Exception:
+                pass
+
+            connect_unique(mat, new_rough.outputs["Color"], gloss_invert.inputs["Color"])
+            connect_unique(mat, gloss_invert.outputs["Color"], princ.inputs["Roughness"])
+        else:
+            connect_unique(mat, new_rough.outputs["Color"], princ.inputs["Roughness"])
 
     if new_met.image and "Metallic" in princ.inputs:
         connect_unique(mat, new_met.outputs["Color"], princ.inputs["Metallic"])
@@ -1435,7 +1462,18 @@ def fill_principled_from_files(props, filepaths):
     if not loaded:
         return False, "No PBR textures were detected. Check the filenames."
 
-    missing = [key for key, value in detected.items() if value is None]
+    missing = []
+
+    for key, value in detected.items():
+        if key == "gloss":
+            continue
+
+        if key == "roughness" and detected["roughness"] is None and detected["gloss"] is not None:
+            continue
+
+        if value is None:
+            missing.append(key)
+
     message = "Loaded and connected: " + ", ".join(loaded)
 
     if missing:
@@ -3081,7 +3119,7 @@ class HL2RemasterProperties(bpy.types.PropertyGroup):
 
     addon_local_version: bpy.props.StringProperty(
         name="Current Version",
-        default="0.7.2",
+        default="0.7.3",
     )
 
     addon_available_version: bpy.props.StringProperty(
@@ -3724,6 +3762,7 @@ def draw_hl2_panel(layout, context, compact=False):
             ref.label(text="Test Maps displacement scale = 1.0")
             ref.label(text="Base plane maps to 0.5")
             ref.label(text="Camera ortho scale is cropped to 99.95% to avoid 1px borders")
+            ref.label(text="Gloss maps are imported as roughness through an invert node")
             ref.label(text="Depth uses symmetric max(front, back)")
             ref.label(text="UV Rectify requires UV Editor, Edit Mode, Sync Off")
             ref.label(text="Dicing Render = 1")
