@@ -1,7 +1,7 @@
 bl_info = {
     "name": "HL2 Material Remaster Baker",
     "author": "Jonatan Mercado",
-    "version": (0, 7, 4),
+    "version": (0, 7, 3),
     "blender": (4, 0, 0),
     "location": "View3D / Image Editor > Sidebar > HL2 Remaster",
     "description": "Orthographic PBR remaster setup, baker, tester, and UV tools for HL2 material textures.",
@@ -221,106 +221,12 @@ def save_image_to_path(img, path):
         return False, f"Could not save image: {error}"
 
 
-def copy_inner_border_pixels_array(source_pixels, width, height, channels, border_pixels):
-    """
-    Copy the first valid inner pixel ring outward into the image border.
-
-    This is meant for displacement/depth exports where the outermost rendered pixel can
-    remain at the mid-level/background value and create a visible frame in displacement.
-    """
-    if width < 3 or height < 3 or channels <= 0:
-        return source_pixels
-
-    max_border = min(width, height) // 2 - 1
-    border_pixels = max(0, min(int(border_pixels), max_border))
-
-    if border_pixels <= 0:
-        return source_pixels
-
-    pixels = source_pixels[:]
-
-    def idx(x, y):
-        return (y * width + x) * channels
-
-    for b in range(border_pixels):
-        bottom_y = b
-        bottom_src_y = b + 1
-
-        top_y = height - 1 - b
-        top_src_y = height - 2 - b
-
-        left_x = b
-        left_src_x = b + 1
-
-        right_x = width - 1 - b
-        right_src_x = width - 2 - b
-
-        # Bottom and top rows.
-        for x in range(width):
-            src = idx(x, bottom_src_y)
-            dst = idx(x, bottom_y)
-            pixels[dst:dst + channels] = pixels[src:src + channels]
-
-            src = idx(x, top_src_y)
-            dst = idx(x, top_y)
-            pixels[dst:dst + channels] = pixels[src:src + channels]
-
-        # Left and right columns.
-        for y in range(height):
-            src = idx(left_src_x, y)
-            dst = idx(left_x, y)
-            pixels[dst:dst + channels] = pixels[src:src + channels]
-
-            src = idx(right_src_x, y)
-            dst = idx(right_x, y)
-            pixels[dst:dst + channels] = pixels[src:src + channels]
-
-    return pixels
-
-
-def make_border_fixed_image_copy(img, border_pixels):
-    if img is None:
-        return None
-
-    width, height = img.size
-    channels = img.channels
-    total = width * height * channels
-
-    source = array.array('f', [0.0]) * total
-    img.pixels.foreach_get(source)
-
-    fixed_pixels = copy_inner_border_pixels_array(
-        source,
-        width,
-        height,
-        channels,
-        border_pixels,
-    )
-
-    fixed_img = bpy.data.images.new(
-        name=f"HL2_BorderFixed_{img.name}",
-        width=width,
-        height=height,
-        alpha=True,
-        float_buffer=True,
-    )
-
-    # New images are usually RGBA. If Blender reports a different channel count
-    # for the source, foreach_set can still use the generated pixel buffer when
-    # both images share the same total channel layout. Viewer images are RGBA.
-    fixed_img.pixels.foreach_set(fixed_pixels)
-    fixed_img.update()
-
-    return fixed_img
-
-
-def save_viewer_as_exr(scene, img, path, fix_border=False, border_pixels=1):
+def save_viewer_as_exr(scene, img, path):
     if img is None:
         return False, "Viewer image not found"
 
     ensure_output_folder(os.path.dirname(path))
     settings = save_render_settings(scene)
-    temp_img = None
 
     try:
         scene.render.image_settings.file_format = 'OPEN_EXR'
@@ -332,38 +238,16 @@ def save_viewer_as_exr(scene, img, path, fix_border=False, border_pixels=1):
         except Exception:
             pass
 
-        save_img = img
-
-        if fix_border:
-            temp_img = make_border_fixed_image_copy(img, border_pixels)
-            if temp_img is not None:
-                save_img = temp_img
-
-        save_img.save_render(path, scene=scene)
+        img.save_render(path, scene=scene)
         restore_render_settings(scene, settings)
 
-        if temp_img is not None:
-            try:
-                bpy.data.images.remove(temp_img)
-            except Exception:
-                pass
-
         if os.path.exists(path):
-            if fix_border:
-                return True, f"{path} | Border fix: {border_pixels}px"
             return True, path
 
         return False, f"EXR was not created: {path}"
 
     except Exception as error:
         restore_render_settings(scene, settings)
-
-        if temp_img is not None:
-            try:
-                bpy.data.images.remove(temp_img)
-            except Exception:
-                pass
-
         return False, f"Could not save displacement EXR: {error}"
 
 
@@ -2423,13 +2307,7 @@ def export_displacement(scene, props):
             restore_render_settings(scene, settings)
             return False, message
 
-        ok, message = save_viewer_as_exr(
-            scene,
-            img,
-            final_path,
-            fix_border=props.fix_displacement_border,
-            border_pixels=props.displacement_border_pixels,
-        )
+        ok, message = save_viewer_as_exr(scene, img, final_path)
         restore_render_settings(scene, settings)
 
         return ok, message
@@ -3222,20 +3100,6 @@ class HL2RemasterProperties(bpy.types.PropertyGroup):
         max=128,
     )
 
-    fix_displacement_border: bpy.props.BoolProperty(
-        name="Fix Displacement Border",
-        description="Copy inner depth pixels into the outer border before saving the displacement EXR",
-        default=True,
-    )
-
-    displacement_border_pixels: bpy.props.IntProperty(
-        name="Border Pixels",
-        description="How many outer pixel rings should copy the next inner pixel ring in the displacement export",
-        default=1,
-        min=1,
-        max=32,
-    )
-
     show_update_changelog: bpy.props.BoolProperty(
         name="Show Changelog",
         default=False,
@@ -3255,7 +3119,7 @@ class HL2RemasterProperties(bpy.types.PropertyGroup):
 
     addon_local_version: bpy.props.StringProperty(
         name="Current Version",
-        default="0.7.4",
+        default="0.7.3",
     )
 
     addon_available_version: bpy.props.StringProperty(
@@ -3832,11 +3696,6 @@ def draw_hl2_panel(layout, context, compact=False):
     depth_box.prop(props, "depth_front_range")
     depth_box.prop(props, "depth_back_range")
     depth_box.prop(props, "depth_blur")
-    depth_box.prop(props, "fix_displacement_border")
-
-    border_row = depth_box.row()
-    border_row.enabled = props.fix_displacement_border
-    border_row.prop(props, "displacement_border_pixels")
 
     depth_box.operator("hl2remaster.setup_depth_pass_viewer", text="Setup Depth Pass Viewer", icon='NODETREE')
     depth_box.operator("hl2remaster.export_displacement", text="Export Displacement EXR", icon='IMAGE_DATA')
@@ -3905,7 +3764,6 @@ def draw_hl2_panel(layout, context, compact=False):
             ref.label(text="Camera ortho scale is cropped to 99.95% to avoid 1px borders")
             ref.label(text="Gloss maps are imported as roughness through an invert node")
             ref.label(text="Depth uses symmetric max(front, back)")
-            ref.label(text="Displacement border fix copies inner pixels to the outer edge")
             ref.label(text="UV Rectify requires UV Editor, Edit Mode, Sync Off")
             ref.label(text="Dicing Render = 1")
             ref.label(text="Dicing Viewport = 1")
