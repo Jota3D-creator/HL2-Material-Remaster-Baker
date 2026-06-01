@@ -1,7 +1,7 @@
 bl_info = {
     "name": "HL2 Material Remaster Baker",
     "author": "Jonatan Mercado",
-    "version": (0, 7, 3),
+    "version": (0, 8, 0),
     "blender": (4, 0, 0),
     "location": "View3D / Image Editor > Sidebar > HL2 Remaster",
     "description": "Orthographic PBR remaster setup, baker, tester, and UV tools for HL2 material textures.",
@@ -17,6 +17,7 @@ import json
 import urllib.request
 from math import hypot
 from collections import defaultdict
+from mathutils import Vector
 from bpy.props import CollectionProperty, StringProperty
 from bpy_extras.io_utils import ImportHelper
 
@@ -288,6 +289,228 @@ def safe_texture_name(value):
     for char in invalid:
         name = name.replace(char, "_")
     return name
+
+
+def source_texture_size(props):
+    """Return source texture pixel size as (width, height), or None.
+
+    This is used to support non-square textures such as 1:2, 2:1, etc.
+    The source texture is the authority for the working aspect ratio.
+    """
+    path = bpy.path.abspath(getattr(props, "source_texture", "") or "")
+
+    if not path or not os.path.isfile(path):
+        return None
+
+    img = load_image_safe(path, "sRGB")
+
+    if img is None:
+        return None
+
+    try:
+        width, height = img.size
+        width = int(width)
+        height = int(height)
+        if width > 0 and height > 0:
+            return width, height
+    except Exception:
+        pass
+
+    return None
+
+
+def get_source_aspect_ratio(props):
+    """Return width / height for the setup. Defaults to 1.0."""
+    if not getattr(props, "use_source_aspect_ratio", True):
+        return 1.0
+
+    size = source_texture_size(props)
+
+    if not size:
+        return 1.0
+
+    width, height = size
+
+    if height <= 0:
+        return 1.0
+
+    return max(0.0001, float(width) / float(height))
+
+
+def get_setup_plane_dimensions(props):
+    """Return physical plane width/height using Plane Size as the largest side.
+
+    Examples with Plane Size = 2.0:
+    - 1:1 -> 2.0 x 2.0
+    - 1:2 -> 1.0 x 2.0
+    - 2:1 -> 2.0 x 1.0
+    """
+    max_side = max(0.01, float(getattr(props, "plane_size", 2.0)))
+    aspect = get_source_aspect_ratio(props)
+
+    if aspect >= 1.0:
+        return max_side, max_side / aspect
+
+    return max_side * aspect, max_side
+
+
+def get_setup_render_resolution(props):
+    """Return render resolution matching the source aspect ratio."""
+    base = int(getattr(props, "resolution", 2048))
+    aspect = get_source_aspect_ratio(props)
+
+    if aspect >= 1.0:
+        width = base
+        height = max(1, int(round(base / aspect)))
+    else:
+        width = max(1, int(round(base * aspect)))
+        height = base
+
+    return width, height
+
+
+def set_plane_dimensions_by_aspect(plane, width, height, mode):
+    """Scale the local plane axes to the requested texture aspect."""
+    rotation = plane_rotation_for_mode(mode)
+
+    plane.rotation_euler = rotation
+    plane.scale = (float(width), float(height), 1.0)
+
+    bpy.ops.object.select_all(action='DESELECT')
+    bpy.context.view_layer.objects.active = plane
+    plane.select_set(True)
+
+    try:
+        bpy.ops.object.transform_apply(location=False, rotation=False, scale=True)
+    except Exception:
+        pass
+
+    plane.rotation_euler = rotation
+
+
+def aspect_uv_bounds_from_plane(width, height):
+    """Return UV bounds with the same visual aspect as the physical plane.
+
+    The longest side fills the 0-1 UV space and the shorter side is centered.
+    Examples:
+    - 1:1 -> U 0..1, V 0..1
+    - 1:2 -> U 0.25..0.75, V 0..1
+    - 2:1 -> U 0..1, V 0.25..0.75
+    """
+    width = max(0.0001, float(width))
+    height = max(0.0001, float(height))
+
+    if width >= height:
+        v_span = height / width
+        v_min = (1.0 - v_span) * 0.5
+        v_max = v_min + v_span
+        return 0.0, 1.0, v_min, v_max
+
+    u_span = width / height
+    u_min = (1.0 - u_span) * 0.5
+    u_max = u_min + u_span
+    return u_min, u_max, 0.0, 1.0
+
+
+def apply_aspect_ratio_uvs_to_plane(plane, width, height):
+    """Make the plane UV island match the physical plane ratio.
+
+    Blender's primitive plane starts with a square 0-1 UV island. For non-square
+    remaster setups this makes the UV editor misleading, so this reshapes the
+    UV island to match the real plane width/height.
+    """
+    if plane is None or plane.type != 'MESH' or plane.data is None:
+        return False
+
+    mesh = plane.data
+    if not mesh.polygons or not mesh.vertices:
+        return False
+
+    try:
+        uv_layer = mesh.uv_layers.active or mesh.uv_layers.new(name="UVMap")
+    except Exception:
+        return False
+
+    u_min, u_max, v_min, v_max = aspect_uv_bounds_from_plane(width, height)
+
+    xs = [v.co.x for v in mesh.vertices]
+    ys = [v.co.y for v in mesh.vertices]
+    min_x, max_x = min(xs), max(xs)
+    min_y, max_y = min(ys), max(ys)
+    span_x = max(max_x - min_x, 0.0001)
+    span_y = max(max_y - min_y, 0.0001)
+
+    for poly in mesh.polygons:
+        for loop_index in poly.loop_indices:
+            loop = mesh.loops[loop_index]
+            vert = mesh.vertices[loop.vertex_index]
+            local_u = (vert.co.x - min_x) / span_x
+            local_v = (vert.co.y - min_y) / span_y
+            uv_layer.data[loop_index].uv = (
+                u_min + local_u * (u_max - u_min),
+                v_min + local_v * (v_max - v_min),
+            )
+
+    try:
+        mesh.update()
+    except Exception:
+        pass
+
+    try:
+        plane["HL2_aspect_uv_width"] = float(width)
+        plane["HL2_aspect_uv_height"] = float(height)
+    except Exception:
+        pass
+
+    return True
+
+
+def apply_full_image_uvs_to_plane(plane):
+    """Set the plane UVs to the full 0-1 image range.
+
+    This is required for reference/display planes such as Old Map: the physical
+    plane already carries the source aspect ratio, so the UVs must sample the
+    entire source image instead of using a centered aspect-ratio island that
+    crops the texture.
+    """
+    if plane is None or plane.type != 'MESH' or plane.data is None:
+        return False
+
+    mesh = plane.data
+    if not mesh.polygons or not mesh.vertices:
+        return False
+
+    try:
+        uv_layer = mesh.uv_layers.active or mesh.uv_layers.new(name="UVMap")
+    except Exception:
+        return False
+
+    xs = [v.co.x for v in mesh.vertices]
+    ys = [v.co.y for v in mesh.vertices]
+    min_x, max_x = min(xs), max(xs)
+    min_y, max_y = min(ys), max(ys)
+    span_x = max(max_x - min_x, 0.0001)
+    span_y = max(max_y - min_y, 0.0001)
+
+    for poly in mesh.polygons:
+        for loop_index in poly.loop_indices:
+            loop = mesh.loops[loop_index]
+            vert = mesh.vertices[loop.vertex_index]
+            local_u = (vert.co.x - min_x) / span_x
+            local_v = (vert.co.y - min_y) / span_y
+            uv_layer.data[loop_index].uv = (local_u, local_v)
+
+    try:
+        mesh.update()
+    except Exception:
+        pass
+
+    try:
+        plane["HL2_full_image_uvs"] = True
+    except Exception:
+        pass
+
+    return True
 
 
 def suggested_blend_path(props):
@@ -780,10 +1003,15 @@ def set_cycles_dicing(scene):
             pass
 
 
-def apply_resolution(scene, resolution):
-    resolution = int(resolution)
-    scene.render.resolution_x = resolution
-    scene.render.resolution_y = resolution
+def apply_resolution(scene, resolution, props=None):
+    if props is not None:
+        width, height = get_setup_render_resolution(props)
+    else:
+        width = int(resolution)
+        height = int(resolution)
+
+    scene.render.resolution_x = int(width)
+    scene.render.resolution_y = int(height)
     scene.render.resolution_percentage = 100
 
 
@@ -799,7 +1027,7 @@ def setup_scene(scene, props, preview=True):
         setup_gpu_if_available()
 
     set_cycles_dicing(scene)
-    apply_resolution(scene, props.resolution)
+    apply_resolution(scene, props.resolution, props)
 
     scene.render.film_transparent = props.transparent_bg
 
@@ -1003,6 +1231,102 @@ def camera_ortho_scale_for_plane(plane_size):
     return float(plane_size) * CAMERA_ORTHO_CROP_FACTOR
 
 
+def get_camera_frame_aspect(scene=None, props=None):
+    """Return camera frame aspect ratio as width / height.
+
+    Blender's camera.ortho_scale represents the visible HEIGHT, not the width.
+    To fit a non-square plane exactly, the height must also consider the render
+    frame aspect: required_ortho = max(plane_height, plane_width / frame_aspect).
+    """
+    if scene is None:
+        scene = bpy.context.scene
+
+    try:
+        width = float(scene.render.resolution_x)
+        height = float(scene.render.resolution_y)
+        if width > 0.0 and height > 0.0:
+            return max(0.0001, width / height)
+    except Exception:
+        pass
+
+    if props is not None:
+        try:
+            width, height = get_setup_render_resolution(props)
+            if width > 0 and height > 0:
+                return max(0.0001, float(width) / float(height))
+        except Exception:
+            pass
+
+    return 1.0
+
+
+def get_visible_size_from_object(obj, mode):
+    """Return visible width/height of an object for the active orthographic setup.
+
+    Front setup camera sees world X/Z.
+    Top-Down setup camera sees world X/Y.
+    This makes the camera fit the actual plane dimensions, even if the user
+    manually changed the plane after setup creation.
+    """
+    if obj is None:
+        return None
+
+    try:
+        points = [obj.matrix_world @ Vector(corner) for corner in obj.bound_box]
+    except Exception:
+        return None
+
+    if not points:
+        return None
+
+    min_x = min(p.x for p in points)
+    max_x = max(p.x for p in points)
+
+    if mode == MODE_FRONT:
+        min_v = min(p.z for p in points)
+        max_v = max(p.z for p in points)
+    else:
+        min_v = min(p.y for p in points)
+        max_v = max(p.y for p in points)
+
+    width = max(0.0001, max_x - min_x)
+    height = max(0.0001, max_v - min_v)
+    return width, height
+
+
+def ortho_scale_to_fit_width_height(width, height, frame_aspect):
+    width = max(0.0001, float(width))
+    height = max(0.0001, float(height))
+    frame_aspect = max(0.0001, float(frame_aspect))
+    return max(height, width / frame_aspect) * CAMERA_ORTHO_CROP_FACTOR
+
+
+def camera_ortho_scale_for_props(props, scene=None, target_obj=None):
+    """Return a stable orthographic scale for the setup camera.
+
+    In Blender, orthographic scale is the visible height of the camera frame.
+    The previous aspect-fit formula could reduce the value to the short side
+    for very wide textures, for example a 2.0 x 0.5 plane could produce an
+    ortho scale of 0.5 when the render frame matched the same aspect ratio.
+
+    For this remaster setup we want the camera scale to remain tied to the
+    physical working plane size, so a 2.0 x 0.5 plane uses an ortho scale near
+    2.0. This matches the manual value that frames the working setup correctly
+    in Blender and avoids the camera becoming too small on non-square textures.
+    """
+    if target_obj is None:
+        target_obj = bpy.data.objects.get(PLANE_NAME)
+
+    visible_size = get_visible_size_from_object(target_obj, props.setup_mode)
+
+    if visible_size:
+        width, height = visible_size
+    else:
+        width, height = get_setup_plane_dimensions(props)
+
+    return max(float(width), float(height), 0.0001) * CAMERA_ORTHO_CROP_FACTOR
+
+
 def lock_camera_transform(cam):
     if cam is None:
         return
@@ -1034,6 +1358,7 @@ def reset_hl2_camera_transform(props):
         props.plane_size,
         props.camera_z_distance,
         props.setup_mode,
+        props,
     )
 
     unlock_camera_transform(cam)
@@ -1041,7 +1366,7 @@ def reset_hl2_camera_transform(props):
     cam.location = camera_location_for_mode(props.setup_mode, props.camera_z_distance)
     cam.rotation_euler = camera_rotation_for_mode(props.setup_mode)
     cam.data.type = 'ORTHO'
-    cam.data.ortho_scale = camera_ortho_scale_for_plane(props.plane_size)
+    cam.data.ortho_scale = camera_ortho_scale_for_props(props, bpy.context.scene, bpy.data.objects.get(PLANE_NAME))
     cam.data.clip_start = 0.01
     cam.data.clip_end = 1000.0
 
@@ -1055,12 +1380,17 @@ def reset_hl2_camera_transform(props):
 # Scene setup objects
 # -----------------------------------------------------------------------------
 
-def get_or_create_plane(col, size=2.0, mode=MODE_FRONT):
+def get_or_create_plane(col, size=2.0, mode=MODE_FRONT, props=None):
     rotation = plane_rotation_for_mode(mode)
     plane = bpy.data.objects.get(PLANE_NAME)
 
+    if props is not None:
+        width, height = get_setup_plane_dimensions(props)
+    else:
+        width, height = float(size), float(size)
+
     if plane is None:
-        bpy.ops.mesh.primitive_plane_add(size=size, location=(0.0, 0.0, 0.0), rotation=rotation)
+        bpy.ops.mesh.primitive_plane_add(size=1.0, location=(0.0, 0.0, 0.0), rotation=rotation)
         plane = bpy.context.object
         plane.name = PLANE_NAME
     else:
@@ -1069,18 +1399,12 @@ def get_or_create_plane(col, size=2.0, mode=MODE_FRONT):
         plane.scale = (1.0, 1.0, 1.0)
 
     move_to_collection(plane, col)
-    plane.dimensions = (size, size, 0.0)
-
-    bpy.ops.object.select_all(action='DESELECT')
-    bpy.context.view_layer.objects.active = plane
-    plane.select_set(True)
-
-    try:
-        bpy.ops.object.transform_apply(location=False, rotation=False, scale=True)
-    except Exception:
-        pass
-
-    plane.rotation_euler = rotation
+    set_plane_dimensions_by_aspect(plane, width, height, mode)
+    # The physical plane carries the source texture aspect ratio.
+    # The UVs should always sample the complete source/remastered image 0-1.
+    # This keeps old textures and new maps aligned and avoids cropping a strip
+    # from non-square textures.
+    apply_full_image_uvs_to_plane(plane)
 
     subsurf = plane.modifiers.get("HL2_Subdivision") or plane.modifiers.new("HL2_Subdivision", 'SUBSURF')
 
@@ -1096,7 +1420,7 @@ def get_or_create_plane(col, size=2.0, mode=MODE_FRONT):
     return plane
 
 
-def get_or_create_camera(col, plane_size=2.0, camera_distance=3.0, mode=MODE_FRONT):
+def get_or_create_camera(col, plane_size=2.0, camera_distance=3.0, mode=MODE_FRONT, props=None):
     cam = bpy.data.objects.get(CAMERA_NAME)
 
     if cam is None:
@@ -1112,7 +1436,7 @@ def get_or_create_camera(col, plane_size=2.0, camera_distance=3.0, mode=MODE_FRO
     cam.rotation_euler = camera_rotation_for_mode(mode)
 
     cam.data.type = 'ORTHO'
-    cam.data.ortho_scale = camera_ortho_scale_for_plane(plane_size)
+    cam.data.ortho_scale = camera_ortho_scale_for_props(props, bpy.context.scene, bpy.data.objects.get(PLANE_NAME)) if props is not None else camera_ortho_scale_for_plane(plane_size)
     cam.data.clip_start = 0.01
     cam.data.clip_end = 1000.0
 
@@ -1740,19 +2064,19 @@ def create_old_map_material(props):
 def create_or_update_old_map_plane(props, create_if_missing=True):
     collection = ensure_collection(ADDON_COLLECTION_NAME)
     original_plane = bpy.data.objects.get(PLANE_NAME)
-    plane_size = props.plane_size
+    plane_width, plane_height = get_setup_plane_dimensions(props)
     mode = props.setup_mode
     rotation = plane_rotation_for_mode(mode)
     if original_plane:
         base_location = original_plane.location.copy()
-        old_location = (base_location.x - plane_size - 0.20, base_location.y, base_location.z)
+        old_location = (base_location.x - plane_width - 0.20, base_location.y, base_location.z)
     else:
-        old_location = (-plane_size - 0.20, 0.0, 0.0)
+        old_location = (-plane_width - 0.20, 0.0, 0.0)
     old_plane = bpy.data.objects.get(OLD_MAP_PLANE_NAME)
     if old_plane is None:
         if not create_if_missing:
             return None
-        bpy.ops.mesh.primitive_plane_add(size=plane_size, location=old_location, rotation=rotation)
+        bpy.ops.mesh.primitive_plane_add(size=1.0, location=old_location, rotation=rotation)
         old_plane = bpy.context.object
         old_plane.name = OLD_MAP_PLANE_NAME
         move_to_collection(old_plane, collection)
@@ -1761,14 +2085,11 @@ def create_or_update_old_map_plane(props, create_if_missing=True):
         old_plane.rotation_euler = rotation
         old_plane.scale = (1.0, 1.0, 1.0)
         move_to_collection(old_plane, collection)
-    bpy.ops.object.select_all(action='DESELECT')
-    bpy.context.view_layer.objects.active = old_plane
-    old_plane.select_set(True)
-    try:
-        bpy.ops.object.transform_apply(location=False, rotation=False, scale=True)
-    except Exception:
-        pass
-    old_plane.rotation_euler = rotation
+    set_plane_dimensions_by_aspect(old_plane, plane_width, plane_height, mode)
+    # Old Map is a source/reference plane. The plane geometry already matches the
+    # source aspect ratio, so its UVs must use the full 0-1 image range. Using the
+    # visual aspect-ratio UV island here would crop the source image.
+    apply_full_image_uvs_to_plane(old_plane)
     mat = create_old_map_material(props)
     assign_material(old_plane, mat)
     make_object_non_renderable(old_plane)
@@ -1907,24 +2228,24 @@ def create_test_maps_material(props):
 def create_or_update_test_maps_plane(props):
     collection = ensure_collection(ADDON_COLLECTION_NAME)
     original_plane = bpy.data.objects.get(PLANE_NAME)
-    plane_size = props.plane_size
+    plane_width, plane_height = get_setup_plane_dimensions(props)
     mode = props.setup_mode
     rotation = plane_rotation_for_mode(mode)
 
     if original_plane:
         base_location = original_plane.location.copy()
         test_location = (
-            base_location.x + plane_size + 0.20,
+            base_location.x + plane_width + 0.20,
             base_location.y,
             base_location.z,
         )
     else:
-        test_location = (plane_size + 0.20, 0.0, 0.0)
+        test_location = (plane_width + 0.20, 0.0, 0.0)
 
     test_plane = bpy.data.objects.get(TEST_PLANE_NAME)
 
     if test_plane is None:
-        bpy.ops.mesh.primitive_plane_add(size=plane_size, location=test_location, rotation=rotation)
+        bpy.ops.mesh.primitive_plane_add(size=1.0, location=test_location, rotation=rotation)
         test_plane = bpy.context.object
         test_plane.name = TEST_PLANE_NAME
         move_to_collection(test_plane, collection)
@@ -1934,16 +2255,10 @@ def create_or_update_test_maps_plane(props):
         test_plane.scale = (1.0, 1.0, 1.0)
         move_to_collection(test_plane, collection)
 
-    bpy.ops.object.select_all(action='DESELECT')
-    bpy.context.view_layer.objects.active = test_plane
-    test_plane.select_set(True)
-
-    try:
-        bpy.ops.object.transform_apply(location=False, rotation=False, scale=True)
-    except Exception:
-        pass
-
-    test_plane.rotation_euler = rotation
+    set_plane_dimensions_by_aspect(test_plane, plane_width, plane_height, mode)
+    # Test Maps must use the full exported image range so every exported map
+    # is evaluated against the complete texture, not a centered aspect crop.
+    apply_full_image_uvs_to_plane(test_plane)
 
     subsurf = test_plane.modifiers.get("HL2_Test_Subdivision")
 
@@ -2076,7 +2391,19 @@ def setup_normal_pass_viewer(scene):
     return True, "Normal viewer ready"
 
 
-def save_front_normal_from_viewer(scene, img, path):
+def save_converted_normal_from_viewer(scene, img, path, mode):
+    """Convert Blender's Normal pass into a texture normal map.
+
+    Blender's Normal pass is in scene/world direction values. For this addon the
+    target normal texture must be mapped to the 2D material orientation used by
+    the current setup mode.
+
+    Front setup uses a vertical X/Z plane whose normal faces -Y:
+        R = X, G = Z, B = -Y
+
+    Top-Down setup uses the standard horizontal X/Y plane:
+        R = X, G = Y, B = Z
+    """
     if img is None:
         return False, "Viewer image not found"
 
@@ -2091,19 +2418,31 @@ def save_front_normal_from_viewer(scene, img, path):
 
     converted = array.array('f', [0.0]) * total
 
+    is_front = mode == MODE_FRONT
+
     for i in range(0, total, 4):
         nx = source[i]
         ny = source[i + 1]
         nz = source[i + 2]
         alpha = source[i + 3]
 
-        converted[i] = clamp01(nx * 0.5 + 0.5)
-        converted[i + 1] = clamp01(nz * 0.5 + 0.5)
-        converted[i + 2] = clamp01((-ny) * 0.5 + 0.5)
+        if is_front:
+            tx = nx
+            ty = nz
+            tz = -ny
+        else:
+            tx = nx
+            ty = ny
+            tz = nz
+
+        converted[i] = clamp01(tx * 0.5 + 0.5)
+        converted[i + 1] = clamp01(ty * 0.5 + 0.5)
+        converted[i + 2] = clamp01(tz * 0.5 + 0.5)
         converted[i + 3] = alpha
 
+    mode_label = "Front" if is_front else "TopDown"
     normal_img = bpy.data.images.new(
-        name=f"HL2_Converted_Front_Normal_{width}x{height}",
+        name=f"HL2_Converted_{mode_label}_Normal_{width}x{height}",
         width=width,
         height=height,
         alpha=True,
@@ -2131,7 +2470,16 @@ def save_front_normal_from_viewer(scene, img, path):
 
     except Exception as error:
         restore_render_settings(scene, settings)
-        return False, f"Could not save converted front normal: {error}"
+        return False, f"Could not save converted normal: {error}"
+
+
+def save_front_normal_from_viewer(scene, img, path):
+    # Backward-compatible wrapper for older calls.
+    return save_converted_normal_from_viewer(scene, img, path, MODE_FRONT)
+
+
+def save_top_down_normal_from_viewer(scene, img, path):
+    return save_converted_normal_from_viewer(scene, img, path, MODE_TOP_DOWN)
 
 
 def export_normal_pass(scene, props):
@@ -2153,11 +2501,7 @@ def export_normal_pass(scene, props):
             return False, message
         bpy.ops.render.render(write_still=False)
         img = rename_latest_viewer("Normal")
-        if props.setup_mode == MODE_FRONT:
-            ok, message = save_front_normal_from_viewer(scene, img, path)
-        else:
-            show_image_in_image_editor(img)
-            ok, message = save_image_to_path(img, path)
+        ok, message = save_converted_normal_from_viewer(scene, img, path, props.setup_mode)
         restore_displacement_scales(disp_records)
         restore_render_settings(scene, settings)
         return ok, message
@@ -2964,7 +3308,7 @@ def update_source_as_camera_bg(self, context):
 
 def update_render_resolution(self, context):
     try:
-        apply_resolution(context.scene, self.resolution)
+        apply_resolution(context.scene, self.resolution, self)
     except Exception:
         pass
 
@@ -3032,8 +3376,22 @@ class HL2RemasterProperties(bpy.types.PropertyGroup):
 
     plane_size: bpy.props.FloatProperty(
         name="Plane Size",
+        description="Largest physical side of the setup plane. Non-square source textures keep this value on their largest side.",
         default=2.0,
         min=0.01,
+    )
+
+    use_source_aspect_ratio: bpy.props.BoolProperty(
+        name="Use Source Aspect Ratio",
+        description="Adapt plane, camera frame, old/test planes, and export resolution to the Source Base Color aspect ratio",
+        default=True,
+        update=update_render_resolution,
+    )
+
+    use_aspect_ratio_uvs: bpy.props.BoolProperty(
+        name="Use Visual Aspect UV Island",
+        description="Legacy option kept for compatibility. The setup now uses full 0-1 image UVs by default so source and remastered maps are not cropped.",
+        default=False,
     )
 
     camera_z_distance: bpy.props.FloatProperty(
@@ -3119,7 +3477,7 @@ class HL2RemasterProperties(bpy.types.PropertyGroup):
 
     addon_local_version: bpy.props.StringProperty(
         name="Current Version",
-        default="0.7.3",
+        default="0.7.9",
     )
 
     addon_available_version: bpy.props.StringProperty(
@@ -3176,8 +3534,8 @@ def create_setup(context, mode):
     col = ensure_collection(ADDON_COLLECTION_NAME)
     setup_scene(scene, props, preview=True)
 
-    plane = get_or_create_plane(col, props.plane_size, mode)
-    cam = get_or_create_camera(col, props.plane_size, props.camera_z_distance, mode)
+    plane = get_or_create_plane(col, props.plane_size, mode, props)
+    cam = get_or_create_camera(col, props.plane_size, props.camera_z_distance, mode, props)
 
     if props.preserve_node_tree_on_setup and current_mat is not None:
         mat = rename_working_material_to_texture(current_mat, props)
@@ -3655,6 +4013,7 @@ def draw_hl2_panel(layout, context, compact=False):
     setup_box.prop(props, "output_folder")
     setup_box.prop(props, "resolution")
     setup_box.prop(props, "plane_size")
+    setup_box.prop(props, "use_source_aspect_ratio")
     setup_box.prop(props, "camera_z_distance")
     setup_box.prop(props, "setup_mode")
 
@@ -3756,12 +4115,17 @@ def draw_hl2_panel(layout, context, compact=False):
             ref.label(text="Create Top-Down Setup = horizontal legacy workflow")
             ref.label(text="Normal adapts to setup mode")
             ref.label(text="Front normal: R=X, G=Z, B=-Y")
+            ref.label(text="Top-Down normal: R=X, G=Y, B=Z")
             ref.label(text="Old Map = left-side source reference")
             ref.label(text="Old/Test planes gap = 0.20m")
             ref.label(text="Old/Test planes are viewport references only, not renderable")
             ref.label(text="Test Maps displacement scale = 1.0")
             ref.label(text="Base plane maps to 0.5")
             ref.label(text="Camera ortho scale is cropped to 99.95% to avoid 1px borders")
+            ref.label(text="Camera ortho scale follows the largest visible plane dimension")
+            ref.label(text="Use Source Aspect Ratio adapts plane and export resolution")
+            ref.label(text="Use Aspect Ratio UVs reshapes working/test UVs; Old Map uses full source image UVs")
+            ref.label(text="Use Source Aspect Ratio adapts plane size and export resolution to non-square textures")
             ref.label(text="Gloss maps are imported as roughness through an invert node")
             ref.label(text="Depth uses symmetric max(front, back)")
             ref.label(text="UV Rectify requires UV Editor, Edit Mode, Sync Off")
