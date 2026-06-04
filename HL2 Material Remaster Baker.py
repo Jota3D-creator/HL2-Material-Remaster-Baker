@@ -1,7 +1,7 @@
 bl_info = {
     "name": "HL2 Material Remaster Baker",
     "author": "Jonatan Mercado",
-    "version": (0, 8, 3),
+    "version": (0, 8, 5),
     "blender": (4, 0, 0),
     "location": "View3D / Image Editor > Sidebar > HL2 Remaster",
     "description": "Orthographic PBR remaster setup, baker, tester, and UV tools for HL2 material textures.",
