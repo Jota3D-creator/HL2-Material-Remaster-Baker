@@ -1,7 +1,7 @@
 bl_info = {
     "name": "HL2 Material Remaster Baker",
     "author": "Jonatan Mercado",
-    "version": (0, 8, 0),
+    "version": (0, 8, 3),
     "blender": (4, 0, 0),
     "location": "View3D / Image Editor > Sidebar > HL2 Remaster",
     "description": "Orthographic PBR remaster setup, baker, tester, and UV tools for HL2 material textures.",
@@ -101,11 +101,20 @@ def delete_test_maps_objects_and_materials():
 
 
 def clear_scene_objects():
-    bpy.ops.object.select_all(action='SELECT')
-    bpy.ops.object.delete()
+    """Clear scene objects without relying on bpy.ops context.
+
+    bpy.ops.object.select_all/delete can fail when the operator is launched from
+    a non-standard UI area or while another editor has focus. Direct datablock
+    removal is context-independent and avoids poll() errors.
+    """
+    for obj in list(bpy.context.scene.objects):
+        try:
+            bpy.data.objects.remove(obj, do_unlink=True)
+        except Exception:
+            pass
 
     col = bpy.data.collections.get(ADDON_COLLECTION_NAME)
-    if col and len(col.objects) == 0:
+    if col and len(col.objects) == 0 and len(col.children) == 0:
         try:
             bpy.data.collections.remove(col)
         except Exception:
@@ -137,6 +146,43 @@ def move_to_collection(obj, col):
         col.objects.link(obj)
     except Exception:
         pass
+
+
+def safe_select_object(obj):
+    """Select an object without bpy.ops so it works from any editor context."""
+    if obj is None:
+        return False
+
+    try:
+        for other in bpy.context.view_layer.objects:
+            other.select_set(False)
+    except Exception:
+        pass
+
+    try:
+        obj.select_set(True)
+        bpy.context.view_layer.objects.active = obj
+        return True
+    except Exception:
+        return False
+
+
+def disable_camera_passepartout(camera):
+    """Remove/disable camera passepartout so the full scene remains visible."""
+    if camera is None or getattr(camera, "type", None) != 'CAMERA':
+        return False
+
+    try:
+        camera.data.show_passepartout = False
+    except Exception:
+        pass
+
+    try:
+        camera.data.passepartout_alpha = 0.0
+    except Exception:
+        pass
+
+    return True
 
 
 def make_object_non_renderable(obj):
@@ -337,6 +383,125 @@ def get_source_aspect_ratio(props):
     return max(0.0001, float(width) / float(height))
 
 
+
+def get_image_aspect_ratio_from_path(path):
+    """Return width / height from an image path, defaulting to 1.0."""
+    path = bpy.path.abspath(path or "")
+    if not path or not os.path.isfile(path):
+        return 1.0
+    img = load_image_safe(path, "sRGB")
+    if img is None:
+        return 1.0
+    try:
+        width, height = img.size
+        width = int(width)
+        height = int(height)
+        if width > 0 and height > 0:
+            return max(0.0001, float(width) / float(height))
+    except Exception:
+        pass
+    return 1.0
+
+
+def pbr_mapping_scale_for_aspect(aspect):
+    """Return NEW PBR mapping scale based on the source aspect ratio."""
+    aspect = max(0.0001, float(aspect or 1.0))
+    if aspect >= 1.0:
+        return aspect, 1.0, 1.0
+    return 1.0, 1.0 / aspect, 1.0
+
+
+def set_mapping_scale(mapping, scale_xyz):
+    if mapping is None:
+        return False
+    try:
+        if "Scale" in mapping.inputs:
+            mapping.inputs["Scale"].default_value[0] = float(scale_xyz[0])
+            mapping.inputs["Scale"].default_value[1] = float(scale_xyz[1])
+            mapping.inputs["Scale"].default_value[2] = float(scale_xyz[2])
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def remove_socket_links(node_tree, socket):
+    try:
+        for link in list(socket.links):
+            node_tree.links.remove(link)
+        return True
+    except Exception:
+        return False
+
+
+def get_or_create_texcoord_and_mapping(mat, mapping_name, label, location, scale_xyz=(1.0, 1.0, 1.0)):
+    if mat is None or not mat.use_nodes:
+        return None, None
+    nodes = mat.node_tree.nodes
+    links = mat.node_tree.links
+    texcoord = nodes.get("HL2_Texture_Coordinate")
+    if texcoord is None or texcoord.bl_idname != "ShaderNodeTexCoord":
+        texcoord = nodes.new("ShaderNodeTexCoord")
+        texcoord.name = "HL2_Texture_Coordinate"
+        texcoord.location = (-1450, 0)
+    mapping = nodes.get(mapping_name)
+    if mapping is None or mapping.bl_idname != "ShaderNodeMapping":
+        mapping = nodes.new("ShaderNodeMapping")
+        mapping.name = mapping_name
+        mapping.location = location
+    mapping.label = label
+    set_mapping_scale(mapping, scale_xyz)
+    if "Vector" in texcoord.outputs and "Vector" in mapping.inputs:
+        linked_from_texcoord = any(link.from_node == texcoord for link in mapping.inputs["Vector"].links)
+        if not linked_from_texcoord:
+            remove_socket_links(mat.node_tree, mapping.inputs["Vector"])
+            links.new(texcoord.outputs["UV"], mapping.inputs["Vector"])
+    return texcoord, mapping
+
+
+def connect_mapping_to_texture_node(mat, mapping, node_name):
+    if mat is None or not mat.use_nodes or mapping is None:
+        return False
+    node = mat.node_tree.nodes.get(node_name)
+    if node is None or node.bl_idname != "ShaderNodeTexImage":
+        return False
+    try:
+        remove_socket_links(mat.node_tree, node.inputs["Vector"])
+        mat.node_tree.links.new(new_mapping.outputs["Vector"], node.inputs["Vector"])
+        return True
+    except Exception:
+        return False
+
+
+def apply_new_pbr_mapping_ratio(mat, props=None, source_texture_path=""):
+    """Keep OLD source full image, and scale only NEW PBR mapping to source ratio."""
+    if mat is None or not mat.use_nodes:
+        return False
+    use_ratio = True
+    if props is not None:
+        use_ratio = bool(getattr(props, "scale_new_pbr_mapping_to_source_ratio", True))
+    if props is not None:
+        aspect = get_source_aspect_ratio(props)
+    else:
+        aspect = get_image_aspect_ratio_from_path(source_texture_path)
+    new_scale = pbr_mapping_scale_for_aspect(aspect) if use_ratio else (1.0, 1.0, 1.0)
+    _tc, old_mapping = get_or_create_texcoord_and_mapping(
+        mat, "HL2_Old_Source_Mapping", "OLD Source Mapping - Full Image", (-1200, 250), (1.0, 1.0, 1.0)
+    )
+    _tc, new_mapping = get_or_create_texcoord_and_mapping(
+        mat, "HL2_New_PBR_Mapping", "NEW PBR Mapping - Source Ratio", (-1200, -240), new_scale
+    )
+    connect_mapping_to_texture_node(mat, old_mapping, "OLD_BaseColor")
+    for node_name in ["NEW_BaseColor", "NEW_Roughness", "NEW_Metallic", "NEW_Normal", "NEW_Height"]:
+        connect_mapping_to_texture_node(mat, new_mapping, node_name)
+    try:
+        mat["HL2_source_aspect_ratio"] = float(aspect)
+        mat["HL2_new_pbr_mapping_scale_x"] = float(new_scale[0])
+        mat["HL2_new_pbr_mapping_scale_y"] = float(new_scale[1])
+    except Exception:
+        pass
+    return True
+
 def get_setup_plane_dimensions(props):
     """Return physical plane width/height using Plane Size as the largest side.
 
@@ -352,6 +517,37 @@ def get_setup_plane_dimensions(props):
         return max_side, max_side / aspect
 
     return max_side * aspect, max_side
+
+
+def get_current_main_plane_dimensions(props):
+    """Return the active setup plane dimensions as the source of truth.
+
+    Helper/reference planes must match the actual main remaster plane, not a
+    stale object scale and not the default primitive-plane size. This keeps
+    Old Map and Test Maps consistent when rebuilding setups with different
+    source aspect ratios or when preserving the node tree.
+    """
+    plane = bpy.data.objects.get(PLANE_NAME)
+
+    if plane is not None:
+        try:
+            width = float(plane.get("HL2_plane_width", 0.0))
+            height = float(plane.get("HL2_plane_height", 0.0))
+            if width > 0.0001 and height > 0.0001:
+                return width, height
+        except Exception:
+            pass
+
+        try:
+            visible = get_visible_size_from_object(plane, props.setup_mode)
+            if visible:
+                width, height = visible
+                if width > 0.0001 and height > 0.0001:
+                    return width, height
+        except Exception:
+            pass
+
+    return get_setup_plane_dimensions(props)
 
 
 def get_setup_render_resolution(props):
@@ -370,22 +566,80 @@ def get_setup_render_resolution(props):
 
 
 def set_plane_dimensions_by_aspect(plane, width, height, mode):
-    """Scale the local plane axes to the requested texture aspect."""
+    """Set the plane mesh to the requested texture aspect without compounding scale.
+
+    The previous version used object scale + transform_apply. That works on a
+    fresh primitive plane, but when creating a new setup while preserving the
+    node tree, the existing mesh already has the previous aspect baked into its
+    vertices. Applying a new scale on top of that compounds the dimensions and
+    can make the new plane overlap the old/reference plane.
+
+    This rebuilds the plane geometry from a centered definition every time, so
+    the final visible size is always exactly width x height, regardless of the
+    previous source texture ratio.
+    """
+    if plane is None or plane.type != 'MESH':
+        return
+
     rotation = plane_rotation_for_mode(mode)
+    width = max(0.0001, float(width))
+    height = max(0.0001, float(height))
 
     plane.rotation_euler = rotation
-    plane.scale = (float(width), float(height), 1.0)
+    plane.scale = (1.0, 1.0, 1.0)
 
-    bpy.ops.object.select_all(action='DESELECT')
-    bpy.context.view_layer.objects.active = plane
-    plane.select_set(True)
+    mesh = plane.data
+    if mesh is None:
+        mesh = bpy.data.meshes.new(plane.name + "_mesh")
+        plane.data = mesh
+
+    # Preserve material slots while rebuilding geometry.
+    try:
+        mesh.clear_geometry()
+    except Exception:
+        old_materials = [mat for mat in mesh.materials]
+        new_mesh = bpy.data.meshes.new(mesh.name)
+        for mat in old_materials:
+            new_mesh.materials.append(mat)
+        plane.data = new_mesh
+        mesh = new_mesh
+
+    half_w = width * 0.5
+    half_h = height * 0.5
+
+    verts = [
+        (-half_w, -half_h, 0.0),
+        ( half_w, -half_h, 0.0),
+        ( half_w,  half_h, 0.0),
+        (-half_w,  half_h, 0.0),
+    ]
+    faces = [(0, 1, 2, 3)]
 
     try:
-        bpy.ops.object.transform_apply(location=False, rotation=False, scale=True)
+        mesh.from_pydata(verts, [], faces)
+        mesh.update()
+    except Exception:
+        pass
+
+    try:
+        plane["HL2_plane_width"] = width
+        plane["HL2_plane_height"] = height
     except Exception:
         pass
 
     plane.rotation_euler = rotation
+    plane.scale = (1.0, 1.0, 1.0)
+
+
+def force_plane_to_current_aspect(plane, props, mode=None):
+    """Force any review/helper plane to exactly match the current source ratio."""
+    if plane is None:
+        return False
+    mode = mode or props.setup_mode
+    width, height = get_current_main_plane_dimensions(props)
+    set_plane_dimensions_by_aspect(plane, width, height, mode)
+    apply_full_image_uvs_to_plane(plane)
+    return True
 
 
 def aspect_uv_bounds_from_plane(width, height):
@@ -1302,29 +1556,22 @@ def ortho_scale_to_fit_width_height(width, height, frame_aspect):
 
 
 def camera_ortho_scale_for_props(props, scene=None, target_obj=None):
-    """Return a stable orthographic scale for the setup camera.
+    """Return a fixed orthographic scale for the setup camera.
 
-    In Blender, orthographic scale is the visible height of the camera frame.
-    The previous aspect-fit formula could reduce the value to the short side
-    for very wide textures, for example a 2.0 x 0.5 plane could produce an
-    ortho scale of 0.5 when the render frame matched the same aspect ratio.
+    Important workflow rule:
+    - Source aspect ratio may change the physical plane width/height.
+    - Source aspect ratio may change render/export resolution.
+    - Source aspect ratio must NOT change camera orthographic scale.
 
-    For this remaster setup we want the camera scale to remain tied to the
-    physical working plane size, so a 2.0 x 0.5 plane uses an ortho scale near
-    2.0. This matches the manual value that frames the working setup correctly
-    in Blender and avoids the camera becoming too small on non-square textures.
+    In Blender, ortho_scale is the visible frame height. For this addon we keep
+    it tied only to the UI Plane Size, so changing from 1:1 to 3:1 or 1:2 does
+    not zoom the review camera in/out. This keeps setups visually consistent
+    when regenerating a texture while preserving the node tree.
     """
-    if target_obj is None:
-        target_obj = bpy.data.objects.get(PLANE_NAME)
-
-    visible_size = get_visible_size_from_object(target_obj, props.setup_mode)
-
-    if visible_size:
-        width, height = visible_size
-    else:
-        width, height = get_setup_plane_dimensions(props)
-
-    return max(float(width), float(height), 0.0001) * CAMERA_ORTHO_CROP_FACTOR
+    try:
+        return max(0.01, float(props.plane_size)) * CAMERA_ORTHO_CROP_FACTOR
+    except Exception:
+        return camera_ortho_scale_for_plane(2.0)
 
 
 def lock_camera_transform(cam):
@@ -1369,6 +1616,7 @@ def reset_hl2_camera_transform(props):
     cam.data.ortho_scale = camera_ortho_scale_for_props(props, bpy.context.scene, bpy.data.objects.get(PLANE_NAME))
     cam.data.clip_start = 0.01
     cam.data.clip_end = 1000.0
+    disable_camera_passepartout(cam)
 
     lock_camera_transform(cam)
     bpy.context.scene.camera = cam
@@ -1439,6 +1687,7 @@ def get_or_create_camera(col, plane_size=2.0, camera_distance=3.0, mode=MODE_FRO
     cam.data.ortho_scale = camera_ortho_scale_for_props(props, bpy.context.scene, bpy.data.objects.get(PLANE_NAME)) if props is not None else camera_ortho_scale_for_plane(plane_size)
     cam.data.clip_start = 0.01
     cam.data.clip_end = 1000.0
+    disable_camera_passepartout(cam)
 
     lock_camera_transform(cam)
 
@@ -1486,12 +1735,22 @@ def create_material_template(source_texture_path="", texture_name=""):
         princ.inputs["Metallic"].default_value = 0.0
 
     texcoord = nodes.new("ShaderNodeTexCoord")
+    texcoord.name = "HL2_Texture_Coordinate"
     texcoord.location = (-1450, 0)
 
-    mapping = nodes.new("ShaderNodeMapping")
-    mapping.location = (-1200, 0)
+    old_mapping = nodes.new("ShaderNodeMapping")
+    old_mapping.name = "HL2_Old_Source_Mapping"
+    old_mapping.label = "OLD Source Mapping - Full Image"
+    old_mapping.location = (-1200, 250)
 
-    links.new(texcoord.outputs["UV"], mapping.inputs["Vector"])
+    new_mapping = nodes.new("ShaderNodeMapping")
+    new_mapping.name = "HL2_New_PBR_Mapping"
+    new_mapping.label = "NEW PBR Mapping - Source Ratio"
+    new_mapping.location = (-1200, -240)
+    set_mapping_scale(new_mapping, pbr_mapping_scale_for_aspect(get_image_aspect_ratio_from_path(source_texture_path)))
+
+    links.new(texcoord.outputs["UV"], old_mapping.inputs["Vector"])
+    links.new(texcoord.outputs["UV"], new_mapping.inputs["Vector"])
 
     old_base = nodes.new("ShaderNodeTexImage")
     old_base.name = "OLD_BaseColor"
@@ -1555,8 +1814,9 @@ def create_material_template(source_texture_path="", texture_name=""):
 
     for node in [new_base, new_rough, new_met, new_norm, new_h]:
         node.interpolation = 'Smart'
-        links.new(mapping.outputs["Vector"], node.inputs["Vector"])
+        links.new(new_mapping.outputs["Vector"], node.inputs["Vector"])
 
+    links.new(old_mapping.outputs["Vector"], old_base.inputs["Vector"])
     links.new(old_base.outputs["Color"], old_diff.inputs["Color"])
     links.new(new_base.outputs["Color"], princ.inputs["Base Color"])
 
@@ -1577,6 +1837,8 @@ def create_material_template(source_texture_path="", texture_name=""):
     links.new(old_diff.outputs["BSDF"], mix.inputs[1])
     links.new(princ.outputs["BSDF"], mix.inputs[2])
     links.new(mix.outputs["Shader"], output.inputs["Surface"])
+
+    apply_new_pbr_mapping_ratio(mat, props=None, source_texture_path=source_texture_path)
 
     return mat
 
@@ -1798,10 +2060,17 @@ def fill_principled_from_files(props, filepaths):
         if value is None:
             missing.append(key)
 
+    apply_new_pbr_mapping_ratio(mat, props=props)
+
     message = "Loaded and connected: " + ", ".join(loaded)
 
     if missing:
         message += ". Missing: " + ", ".join(missing)
+
+    if getattr(props, "scale_new_pbr_mapping_to_source_ratio", True):
+        aspect = get_source_aspect_ratio(props)
+        scale_x, scale_y, _scale_z = pbr_mapping_scale_for_aspect(aspect)
+        message += f". NEW PBR mapping scale: X={scale_x:.3f}, Y={scale_y:.3f}"
 
     return True, message
 
@@ -2064,7 +2333,7 @@ def create_old_map_material(props):
 def create_or_update_old_map_plane(props, create_if_missing=True):
     collection = ensure_collection(ADDON_COLLECTION_NAME)
     original_plane = bpy.data.objects.get(PLANE_NAME)
-    plane_width, plane_height = get_setup_plane_dimensions(props)
+    plane_width, plane_height = get_current_main_plane_dimensions(props)
     mode = props.setup_mode
     rotation = plane_rotation_for_mode(mode)
     if original_plane:
@@ -2085,11 +2354,9 @@ def create_or_update_old_map_plane(props, create_if_missing=True):
         old_plane.rotation_euler = rotation
         old_plane.scale = (1.0, 1.0, 1.0)
         move_to_collection(old_plane, collection)
-    set_plane_dimensions_by_aspect(old_plane, plane_width, plane_height, mode)
-    # Old Map is a source/reference plane. The plane geometry already matches the
-    # source aspect ratio, so its UVs must use the full 0-1 image range. Using the
-    # visual aspect-ratio UV island here would crop the source image.
-    apply_full_image_uvs_to_plane(old_plane)
+    # Old Map must match the current main plane aspect ratio exactly.
+    # Its UVs stay full 0-1 so the old/source image is shown complete.
+    force_plane_to_current_aspect(old_plane, props, mode)
     mat = create_old_map_material(props)
     assign_material(old_plane, mat)
     make_object_non_renderable(old_plane)
@@ -2228,7 +2495,7 @@ def create_test_maps_material(props):
 def create_or_update_test_maps_plane(props):
     collection = ensure_collection(ADDON_COLLECTION_NAME)
     original_plane = bpy.data.objects.get(PLANE_NAME)
-    plane_width, plane_height = get_setup_plane_dimensions(props)
+    plane_width, plane_height = get_current_main_plane_dimensions(props)
     mode = props.setup_mode
     rotation = plane_rotation_for_mode(mode)
 
@@ -2255,10 +2522,9 @@ def create_or_update_test_maps_plane(props):
         test_plane.scale = (1.0, 1.0, 1.0)
         move_to_collection(test_plane, collection)
 
-    set_plane_dimensions_by_aspect(test_plane, plane_width, plane_height, mode)
-    # Test Maps must use the full exported image range so every exported map
-    # is evaluated against the complete texture, not a centered aspect crop.
-    apply_full_image_uvs_to_plane(test_plane)
+    # Test Maps must match the current main plane aspect ratio exactly.
+    # Its UVs stay full 0-1 so every exported map is evaluated complete.
+    force_plane_to_current_aspect(test_plane, props, mode)
 
     subsurf = test_plane.modifiers.get("HL2_Test_Subdivision")
 
@@ -3388,6 +3654,12 @@ class HL2RemasterProperties(bpy.types.PropertyGroup):
         update=update_render_resolution,
     )
 
+    scale_new_pbr_mapping_to_source_ratio: bpy.props.BoolProperty(
+        name="Scale NEW PBR Mapping to Source Ratio",
+        description="Tile NEW PBR textures along the long side of the source texture ratio instead of stretching square inputs",
+        default=True,
+    )
+
     use_aspect_ratio_uvs: bpy.props.BoolProperty(
         name="Use Visual Aspect UV Island",
         description="Legacy option kept for compatibility. The setup now uses full 0-1 image UVs by default so source and remastered maps are not cropped.",
@@ -3477,7 +3749,7 @@ class HL2RemasterProperties(bpy.types.PropertyGroup):
 
     addon_local_version: bpy.props.StringProperty(
         name="Current Version",
-        default="0.7.9",
+        default="0.8.3",
     )
 
     addon_available_version: bpy.props.StringProperty(
@@ -3543,6 +3815,7 @@ def create_setup(context, mode):
     else:
         mat = create_material_template(props.source_texture, props.texture_name)
 
+    apply_new_pbr_mapping_ratio(mat, props=props)
     assign_material(plane, mat)
     scene.camera = cam
 
@@ -3862,9 +4135,7 @@ class HL2REM_OT_test_maps(bpy.types.Operator):
         try:
             test_plane = create_or_update_test_maps_plane(props)
 
-            bpy.ops.object.select_all(action='DESELECT')
-            test_plane.select_set(True)
-            bpy.context.view_layer.objects.active = test_plane
+            safe_select_object(test_plane)
 
             self.report({'INFO'}, "Test maps plane created")
             return {'FINISHED'}
@@ -3892,9 +4163,7 @@ class HL2REM_OT_old_map(bpy.types.Operator):
             if old_plane is None:
                 self.report({'ERROR'}, "Could not create Old Map plane")
                 return {'CANCELLED'}
-            bpy.ops.object.select_all(action='DESELECT')
-            old_plane.select_set(True)
-            bpy.context.view_layer.objects.active = old_plane
+            safe_select_object(old_plane)
             self.report({'INFO'}, "Old Map plane created")
             return {'FINISHED'}
         except Exception as error:
@@ -4014,6 +4283,7 @@ def draw_hl2_panel(layout, context, compact=False):
     setup_box.prop(props, "resolution")
     setup_box.prop(props, "plane_size")
     setup_box.prop(props, "use_source_aspect_ratio")
+    setup_box.prop(props, "scale_new_pbr_mapping_to_source_ratio")
     setup_box.prop(props, "camera_z_distance")
     setup_box.prop(props, "setup_mode")
 
@@ -4122,10 +4392,11 @@ def draw_hl2_panel(layout, context, compact=False):
             ref.label(text="Test Maps displacement scale = 1.0")
             ref.label(text="Base plane maps to 0.5")
             ref.label(text="Camera ortho scale is cropped to 99.95% to avoid 1px borders")
-            ref.label(text="Camera ortho scale follows the largest visible plane dimension")
+            ref.label(text="Camera ortho scale stays fixed from Plane Size, independent of aspect ratio")
+            ref.label(text="Camera passepartout is disabled")
             ref.label(text="Use Source Aspect Ratio adapts plane and export resolution")
             ref.label(text="Use Aspect Ratio UVs reshapes working/test UVs; Old Map uses full source image UVs")
-            ref.label(text="Use Source Aspect Ratio adapts plane size and export resolution to non-square textures")
+            ref.label(text="Use Source Aspect Ratio adapts plane size and export resolution, not camera zoom")
             ref.label(text="Gloss maps are imported as roughness through an invert node")
             ref.label(text="Depth uses symmetric max(front, back)")
             ref.label(text="UV Rectify requires UV Editor, Edit Mode, Sync Off")
